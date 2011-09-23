@@ -48,6 +48,9 @@
 # find one, or @{upstream} otherwise.  Once you have set
 # GIT_PS1_SHOWUPSTREAM, you can override it on a per-repository basis by
 # setting the bash.showUpstream config variable.
+#
+# You can disable output from __git_ps1 per repository by setting
+# the bash.prompt config variable to "false".
 
 # __gitdir accepts 0 or 1 arguments (i.e., location)
 # returns location of .git repo
@@ -198,7 +201,9 @@ __git_ps1_show_upstream ()
 __git_ps1 ()
 {
 	local g="$(__gitdir)"
-	if [ -n "$g" ]; then
+	if [ "$( git config bash.prompt )" == "false" ]; then
+		echo ""
+	elif [ -n "$g" ]; then
 		local r=""
 		local b=""
 		if [ -f "$g/rebase-merge/interactive" ]; then
