@@ -1,12 +1,12 @@
 package Git::SVN::Fetcher;
-use vars qw/@ISA $_ignore_regex $_preserve_empty_dirs $_placeholder_filename
-            @deleted_gpath %added_placeholder $repo_id/;
+use vars qw/@ISA $_ignore_regex $_include_regex $_preserve_empty_dirs
+            $_placeholder_filename @deleted_gpath %added_placeholder
+            $repo_id/;
 use strict;
 use warnings;
 use SVN::Delta;
 use Carp qw/croak/;
 use File::Basename qw/dirname/;
-use IO::File qw//;
 use Git qw/command command_oneline command_noisy command_output_pipe
            command_input_pipe command_close_pipe
            command_bidi_pipe command_close_bidi_pipe/;
@@ -32,6 +32,10 @@ sub new {
 	my $k = "svn-remote.$repo_id.ignore-paths";
 	my $v = eval { command_oneline('config', '--get', $k) };
 	$self->{ignore_regex} = $v;
+
+	$k = "svn-remote.$repo_id.include-paths";
+	$v = eval { command_oneline('config', '--get', $k) };
+	$self->{include_regex} = $v;
 
 	$k = "svn-remote.$repo_id.preserve-empty-dirs";
 	$v = eval { command_oneline('config', '--get', '--bool', $k) };
@@ -117,11 +121,18 @@ sub in_dot_git {
 }
 
 # return value: 0 -- don't ignore, 1 -- ignore
+# This will also check whether the path is explicitly included
 sub is_path_ignored {
 	my ($self, $path) = @_;
 	return 1 if in_dot_git($path);
 	return 1 if defined($self->{ignore_regex}) &&
 	            $path =~ m!$self->{ignore_regex}!;
+	return 0 if defined($self->{include_regex}) &&
+	            $path =~ m!$self->{include_regex}!;
+	return 0 if defined($_include_regex) &&
+	            $path =~ m!$_include_regex!;
+	return 1 if defined($self->{include_regex});
+	return 1 if defined($_include_regex);
 	return 0 unless defined($_ignore_regex);
 	return 1 if $path =~ m!$_ignore_regex!o;
 	return 0;
@@ -303,11 +314,21 @@ sub change_file_prop {
 sub apply_textdelta {
 	my ($self, $fb, $exp) = @_;
 	return undef if $self->is_path_ignored($fb->{path});
-	my $fh = $::_repository->temp_acquire('svn_delta');
+	my $suffix = 0;
+	++$suffix while $::_repository->temp_is_locked("svn_delta_${$}_$suffix");
+	my $fh = $::_repository->temp_acquire("svn_delta_${$}_$suffix");
 	# $fh gets auto-closed() by SVN::TxDelta::apply(),
 	# (but $base does not,) so dup() it for reading in close_file
 	open my $dup, '<&', $fh or croak $!;
-	my $base = $::_repository->temp_acquire('git_blob');
+	my $base = $::_repository->temp_acquire("git_blob_${$}_$suffix");
+	# close_file may call temp_acquire on 'svn_hash', but because of the
+	# call chain, if the temp_acquire call from close_file ends up being the
+	# call that first creates the 'svn_hash' temp file, then the FileHandle
+	# that's created as a result will end up in an SVN::Pool that we clear
+	# in SVN::Ra::gs_fetch_loop_common.  Avoid that by making sure the
+	# 'svn_hash' FileHandle is already created before close_file is called.
+	my $tmp_fh = $::_repository->temp_acquire('svn_hash');
+	$::_repository->temp_release($tmp_fh, 1);
 
 	if ($fb->{blob}) {
 		my ($base_is_link, $size);
@@ -512,6 +533,8 @@ sub stash_placeholder_list {
 1;
 __END__
 
+=head1 NAME
+
 Git::SVN::Fetcher - tree delta consumer for "git svn fetch"
 
 =head1 SYNOPSIS
@@ -584,7 +607,7 @@ developing git-svn.
 =head1 DEPENDENCIES
 
 L<SVN::Delta> from the Subversion perl bindings,
-the core L<Carp>, L<File::Basename>, and L<IO::File> modules,
+the core L<Carp> and L<File::Basename> modules,
 and git's L<Git> helper module.
 
 C<Git::SVN::Fetcher> has not been tested using callers other than

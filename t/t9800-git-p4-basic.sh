@@ -30,6 +30,11 @@ test_expect_success 'basic git p4 clone' '
 	)
 '
 
+test_expect_success 'depot typo error' '
+	test_must_fail git p4 clone --dest="$git" /depot 2>errs &&
+	grep "Depot paths must start with" errs
+'
+
 test_expect_success 'git p4 clone @all' '
 	git p4 clone --dest="$git" //depot@all &&
 	test_when_finished cleanup_git &&
@@ -126,6 +131,44 @@ test_expect_success 'clone two dirs, @all, conflicting files' '
 	)
 '
 
+revision_ranges="2000/01/01,#head \
+		 1,2080/01/01 \
+		 2000/01/01,2080/01/01 \
+		 2000/01/01,1000 \
+		 1,1000"
+
+test_expect_success 'clone using non-numeric revision ranges' '
+	test_when_finished cleanup_git &&
+	for r in $revision_ranges
+	do
+		rm -fr "$git" &&
+		test ! -d "$git" &&
+		git p4 clone --dest="$git" //depot@$r &&
+		(
+			cd "$git" &&
+			git ls-files >lines &&
+			test_line_count = 6 lines
+		)
+	done
+'
+
+test_expect_success 'clone with date range, excluding some changes' '
+	test_when_finished cleanup_git &&
+	before=$(date +%Y/%m/%d:%H:%M:%S) &&
+	sleep 2 &&
+	(
+		cd "$cli" &&
+		:>date_range_test &&
+		p4 add date_range_test &&
+		p4 submit -d "Adding file"
+	) &&
+	git p4 clone --dest="$git" //depot@1,$before &&
+	(
+		cd "$git" &&
+		test_path_is_missing date_range_test
+	)
+'
+
 test_expect_success 'exit when p4 fails to produce marshaled output' '
 	mkdir badp4dir &&
 	test_when_finished "rm badp4dir/p4 && rmdir badp4dir" &&
@@ -140,18 +183,32 @@ test_expect_success 'exit when p4 fails to produce marshaled output' '
 		test_expect_code 1 git p4 clone --dest="$git" //depot >errs 2>&1
 	) &&
 	cat errs &&
-	! test_i18ngrep Traceback errs
+	test_i18ngrep ! Traceback errs
 '
 
-test_expect_success 'clone bare' '
+# Hide a file from p4d, make sure we catch its complaint.  This won't fail in
+# p4 changes, files, or describe; just in p4 print.  If P4CLIENT is unset, the
+# message will include "Librarian checkout".
+test_expect_success 'exit gracefully for p4 server errors' '
+	test_when_finished "mv \"$db\"/depot/file1,v,hidden \"$db\"/depot/file1,v" &&
+	mv "$db"/depot/file1,v "$db"/depot/file1,v,hidden &&
+	test_when_finished cleanup_git &&
+	test_expect_code 1 git p4 clone --dest="$git" //depot@1 >out 2>err &&
+	test_i18ngrep "Error from p4 print" err
+'
+
+test_expect_success 'clone --bare should make a bare repository' '
 	rm -rf "$git" &&
 	git p4 clone --dest="$git" --bare //depot &&
 	test_when_finished cleanup_git &&
 	(
 		cd "$git" &&
-		test ! -d .git &&
-		bare=`git config --get core.bare` &&
-		test "$bare" = true
+		test_path_is_missing .git &&
+		git config --get --bool core.bare true &&
+		git rev-parse --verify refs/remotes/p4/master &&
+		git rev-parse --verify refs/remotes/p4/HEAD &&
+		git rev-parse --verify refs/heads/master &&
+		git rev-parse --verify HEAD
 	)
 '
 
@@ -169,6 +226,34 @@ test_expect_success 'initial import time from top change time' '
 		gittime=$(git show -s --raw --pretty=format:%at HEAD) &&
 		echo $p4time $gittime &&
 		test $p4time = $gittime
+	)
+'
+
+test_expect_success 'unresolvable host in P4PORT should display error' '
+	test_when_finished cleanup_git &&
+	git p4 clone --dest="$git" //depot &&
+	(
+		cd "$git" &&
+		P4PORT=nosuchhost:65537 &&
+		export P4PORT &&
+		test_expect_code 1 git p4 sync >out 2>err &&
+		grep "connect to nosuchhost" err
+	)
+'
+
+test_expect_success 'submit from detached head' '
+	test_when_finished cleanup_git &&
+	git p4 clone --dest="$git" //depot &&
+	(
+		cd "$git" &&
+		git checkout p4/master &&
+		>detached_head_test &&
+		git add detached_head_test &&
+		git commit -m "add detached_head" &&
+		git config git-p4.skipSubmitEdit true &&
+		git p4 submit &&
+		git p4 rebase &&
+		git log p4/master | grep detached_head
 	)
 '
 

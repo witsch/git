@@ -17,6 +17,16 @@ test_expect_success 'init depot' '
 	)
 '
 
+test_expect_success 'is_cli_file_writeable function' '
+	(
+		cd "$cli" &&
+		echo a >a &&
+		is_cli_file_writeable a &&
+		! is_cli_file_writeable file1 &&
+		rm a
+	)
+'
+
 test_expect_success 'submit with no client dir' '
 	test_when_finished cleanup_git &&
 	git p4 clone --dest="$git" //depot &&
@@ -200,7 +210,7 @@ test_expect_success 'submit copy' '
 	(
 		cd "$cli" &&
 		test_path_is_file file5.ta &&
-		test ! -w file5.ta
+		! is_cli_file_writeable file5.ta
 	)
 '
 
@@ -219,7 +229,7 @@ test_expect_success 'submit rename' '
 		cd "$cli" &&
 		test_path_is_missing file6.t &&
 		test_path_is_file file6.ta &&
-		test ! -w file6.ta
+		! is_cli_file_writeable file6.ta
 	)
 '
 
@@ -379,7 +389,7 @@ test_expect_success 'description with Jobs section and bogus following text' '
 	(
 		cd "$cli" &&
 		p4 revert desc6 &&
-		rm desc6
+		rm -f desc6
 	)
 '
 
@@ -393,7 +403,8 @@ test_expect_success 'submit --prepare-p4-only' '
 		git commit -m "prep only add" &&
 		git p4 submit --prepare-p4-only >out &&
 		test_i18ngrep "prepared for submission" out &&
-		test_i18ngrep "must be deleted" out
+		test_i18ngrep "must be deleted" out &&
+		test_i18ngrep ! "everything below this line is just the diff" out
 	) &&
 	(
 		cd "$cli" &&

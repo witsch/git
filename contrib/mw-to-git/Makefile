@@ -1,47 +1,57 @@
 #
-# Copyright (C) 2012
-#     Charles Roussel <charles.roussel@ensimag.imag.fr>
-#     Simon Cathebras <simon.cathebras@ensimag.imag.fr>
-#     Julien Khayat <julien.khayat@ensimag.imag.fr>
-#     Guillaume Sasdy <guillaume.sasdy@ensimag.imag.fr>
-#     Simon Perrat <simon.perrat@ensimag.imag.fr>
+# Copyright (C) 2013
+#     Matthieu Moy <Matthieu.Moy@imag.fr>
 #
-## Build git-remote-mediawiki
+# To build and test:
+#
+#   make
+#   bin-wrapper/git mw preview Some_page.mw
+#   bin-wrapper/git clone mediawiki::http://example.com/wiki/
+#
+# To install, run Git's toplevel 'make install' then run:
+#
+#   make install
 
--include ../../config.mak.autogen
--include ../../config.mak
+GIT_MEDIAWIKI_PM=Git/Mediawiki.pm
+SCRIPT_PERL=git-remote-mediawiki.perl
+SCRIPT_PERL+=git-mw.perl
+GIT_ROOT_DIR=../..
+HERE=contrib/mw-to-git/
 
-ifndef PERL_PATH
-	PERL_PATH = /usr/bin/perl
-endif
-ifndef gitexecdir
-	gitexecdir = $(shell git --exec-path)
-endif
+INSTALL = install
 
-PERL_PATH_SQ = $(subst ','\'',$(PERL_PATH))
-gitexecdir_SQ = $(subst ','\'',$(gitexecdir))
-SCRIPT = git-remote-mediawiki
+SCRIPT_PERL_FULL=$(patsubst %,$(HERE)/%,$(SCRIPT_PERL))
+INSTLIBDIR=$(shell $(MAKE) -C $(GIT_ROOT_DIR)/perl \
+                -s --no-print-directory instlibdir)
+DESTDIR_SQ = $(subst ','\'',$(DESTDIR))
+INSTLIBDIR_SQ = $(subst ','\'',$(INSTLIBDIR))
 
-.PHONY: install help doc test clean
+all: build
 
-help:
-	@echo 'This is the help target of the Makefile. Current configuration:'
-	@echo '  gitexecdir = $(gitexecdir_SQ)'
-	@echo '  PERL_PATH = $(PERL_PATH_SQ)'
-	@echo 'Run "$(MAKE) install" to install $(SCRIPT) in gitexecdir'
-	@echo 'Run "$(MAKE) test" to run the testsuite'
+test: all
+	$(MAKE) -C t
 
-install:
-	sed -e '1s|#!.*/perl|#!$(PERL_PATH_SQ)|' $(SCRIPT) \
-		> '$(gitexecdir_SQ)/$(SCRIPT)'
-	chmod +x '$(gitexecdir)/$(SCRIPT)'
+check: perlcritic test
 
-doc:
-	@echo 'Sorry, "make doc" is not implemented yet for $(SCRIPT)'
+install_pm:
+	$(INSTALL) -d -m 755 '$(DESTDIR_SQ)$(INSTLIBDIR_SQ)/Git'
+	$(INSTALL) -m 644 $(GIT_MEDIAWIKI_PM) \
+		'$(DESTDIR_SQ)$(INSTLIBDIR_SQ)/$(GIT_MEDIAWIKI_PM)'
 
-test:
-	$(MAKE) -C t/ test
+build:
+	$(MAKE) -C $(GIT_ROOT_DIR) SCRIPT_PERL="$(SCRIPT_PERL_FULL)" \
+                build-perl-script
+
+install: install_pm
+	$(MAKE) -C $(GIT_ROOT_DIR) SCRIPT_PERL="$(SCRIPT_PERL_FULL)" \
+                install-perl-script
 
 clean:
-	$(RM) '$(gitexecdir)/$(SCRIPT)'
-	$(MAKE) -C t/ clean
+	$(MAKE) -C $(GIT_ROOT_DIR) SCRIPT_PERL="$(SCRIPT_PERL_FULL)" \
+                clean-perl-script
+
+perlcritic:
+	perlcritic -5 $(SCRIPT_PERL)
+	-perlcritic -2 $(SCRIPT_PERL)
+
+.PHONY: all test check install_pm install clean perlcritic

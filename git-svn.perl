@@ -11,14 +11,10 @@ $AUTHOR = 'Eric Wong <normalperson@yhbt.net>';
 $VERSION = '@@GIT_VERSION@@';
 
 use Carp qw/croak/;
-use Digest::MD5;
-use IO::File qw//;
 use File::Basename qw/dirname basename/;
 use File::Path qw/mkpath/;
 use File::Spec;
-use File::Find;
 use Getopt::Long qw/:config gnu_getopt no_ignore_case auto_abbrev/;
-use IPC::Open3;
 use Memoize;
 
 use Git::SVN;
@@ -61,8 +57,6 @@ my $cmd_dir_prefix = eval {
 	command_oneline([qw/rev-parse --show-prefix/], STDERR => 0)
 } || '';
 
-my $git_dir_user_set = 1 if defined $ENV{GIT_DIR};
-$ENV{GIT_DIR} ||= '.git';
 $Git::SVN::Ra::_log_window_size = 100;
 
 if (! exists $ENV{SVN_SSH} && exists $ENV{GIT_SSH}) {
@@ -114,9 +108,10 @@ my ($_stdin, $_help, $_edit,
 	$_message, $_file, $_branch_dest,
 	$_template, $_shared,
 	$_version, $_fetch_all, $_no_rebase, $_fetch_parent,
-	$_merge, $_strategy, $_preserve_merges, $_dry_run, $_local,
+	$_before, $_after,
+	$_merge, $_strategy, $_preserve_merges, $_dry_run, $_parents, $_local,
 	$_prefix, $_no_checkout, $_url, $_verbose,
-	$_commit_url, $_tag, $_merge_info, $_interactive);
+	$_commit_url, $_tag, $_merge_info, $_interactive, $_set_svn_props);
 
 # This is a refactoring artifact so Git::SVN can get at this git-svn switch.
 sub opt_prefix { return $_prefix || '' }
@@ -127,6 +122,7 @@ my %remote_opts = ( 'username=s' => \$Git::SVN::Prompt::_username,
                     'config-dir=s' => \$Git::SVN::Ra::config_dir,
                     'no-auth-cache' => \$Git::SVN::Prompt::_no_auth_cache,
                     'ignore-paths=s' => \$Git::SVN::Fetcher::_ignore_regex,
+                    'include-paths=s' => \$Git::SVN::Fetcher::_include_regex,
                     'ignore-refs=s' => \$Git::SVN::Ra::_ignore_refs_regex );
 my %fc_opts = ( 'follow-parent|follow!' => \$Git::SVN::_follow_parent,
 		'authors-file|A=s' => \$_authors,
@@ -193,6 +189,7 @@ my %cmd = (
 			  'dry-run|n' => \$_dry_run,
 			  'fetch-all|all' => \$_fetch_all,
 			  'commit-url=s' => \$_commit_url,
+			  'set-svn-props=s' => \$_set_svn_props,
 			  'revision|r=i' => \$_revision,
 			  'no-rebase' => \$_no_rebase,
 			  'mergeinfo=s' => \$_merge_info,
@@ -203,6 +200,7 @@ my %cmd = (
 	            { 'message|m=s' => \$_message,
 	              'destination|d=s' => \$_branch_dest,
 	              'dry-run|n' => \$_dry_run,
+	              'parents' => \$_parents,
 	              'tag|t' => \$_tag,
 	              'username=s' => \$Git::SVN::Prompt::_username,
 	              'commit-url=s' => \$_commit_url } ],
@@ -211,6 +209,7 @@ my %cmd = (
 	         { 'message|m=s' => \$_message,
 	           'destination|d=s' => \$_branch_dest,
 	           'dry-run|n' => \$_dry_run,
+	           'parents' => \$_parents,
 	           'username=s' => \$Git::SVN::Prompt::_username,
 	           'commit-url=s' => \$_commit_url } ],
 	'set-tree' => [ \&cmd_set_tree,
@@ -226,6 +225,9 @@ my %cmd = (
         'propget' => [ \&cmd_propget,
 		       'Print the value of a property on a file or directory',
 		       { 'revision|r=i' => \$_revision } ],
+        'propset' => [ \&cmd_propset,
+		       'Set the value of a property on a file or directory - will be set on commit',
+		       {} ],
         'proplist' => [ \&cmd_proplist,
 		       'List all properties of a file or directory',
 		       { 'revision|r=i' => \$_revision } ],
@@ -258,7 +260,8 @@ my %cmd = (
 			} ],
 	'find-rev' => [ \&cmd_find_rev,
 	                "Translate between SVN revision numbers and tree-ish",
-			{} ],
+			{ 'B|before' => \$_before,
+			  'A|after' => \$_after } ],
 	'rebase' => [ \&cmd_rebase, "Fetch and rebase your working directory",
 			{ 'merge|m|M' => \$_merge,
 			  'verbose|v' => \$_verbose,
@@ -291,7 +294,6 @@ my %cmd = (
 		{} ],
 );
 
-use Term::ReadLine;
 package FakeTerm;
 sub new {
 	my ($class, $reason) = @_;
@@ -303,13 +305,17 @@ sub readline {
 }
 package main;
 
-my $term = eval {
-	$ENV{"GIT_SVN_NOTTY"}
-		? new Term::ReadLine 'git-svn', \*STDIN, \*STDOUT
-		: new Term::ReadLine 'git-svn';
-};
-if ($@) {
-	$term = new FakeTerm "$@: going non-interactive";
+my $term;
+sub term_init {
+	$term = eval {
+		require Term::ReadLine;
+		$ENV{"GIT_SVN_NOTTY"}
+			? new Term::ReadLine 'git-svn', \*STDIN, \*STDOUT
+			: new Term::ReadLine 'git-svn';
+	};
+	if ($@) {
+		$term = new FakeTerm "$@: going non-interactive";
+	}
 }
 
 my $cmd;
@@ -325,27 +331,26 @@ for (my $i = 0; $i < @ARGV; $i++) {
 };
 
 # make sure we're always running at the top-level working directory
-unless ($cmd && $cmd =~ /(?:clone|init|multi-init)$/) {
-	unless (-d $ENV{GIT_DIR}) {
-		if ($git_dir_user_set) {
-			die "GIT_DIR=$ENV{GIT_DIR} explicitly set, ",
-			    "but it is not a directory\n";
-		}
-		my $git_dir = delete $ENV{GIT_DIR};
-		my $cdup = undef;
-		git_cmd_try {
-			$cdup = command_oneline(qw/rev-parse --show-cdup/);
-			$git_dir = '.' unless ($cdup);
-			chomp $cdup if ($cdup);
-			$cdup = "." unless ($cdup && length $cdup);
-		} "Already at toplevel, but $git_dir not found\n";
-		chdir $cdup or die "Unable to chdir up to '$cdup'\n";
-		unless (-d $git_dir) {
-			die "$git_dir still not found after going to ",
-			    "'$cdup'\n";
-		}
-		$ENV{GIT_DIR} = $git_dir;
+if ($cmd && $cmd =~ /(?:clone|init|multi-init)$/) {
+	$ENV{GIT_DIR} ||= ".git";
+	# catch the submodule case
+	if (-f $ENV{GIT_DIR}) {
+		open(my $fh, '<', $ENV{GIT_DIR}) or
+			die "failed to open $ENV{GIT_DIR}: $!\n";
+		$ENV{GIT_DIR} = $1 if <$fh> =~ /^gitdir: (.+)$/;
 	}
+} else {
+	my ($git_dir, $cdup);
+	git_cmd_try {
+		$git_dir = command_oneline([qw/rev-parse --git-dir/]);
+	} "Unable to find .git directory\n";
+	git_cmd_try {
+		$cdup = command_oneline(qw/rev-parse --show-cdup/);
+		chomp $cdup if ($cdup);
+		$cdup = "." unless ($cdup && length $cdup);
+	} "Already at toplevel, but $git_dir not found\n";
+	$ENV{GIT_DIR} = $git_dir;
+	chdir $cdup or die "Unable to chdir up to '$cdup'\n";
 	$_repository = Git->repository(Repository => $ENV{GIT_DIR});
 }
 
@@ -389,7 +394,7 @@ sub usage {
 	my $fd = $exit ? \*STDERR : \*STDOUT;
 	print $fd <<"";
 git-svn - bidirectional operations between a single Subversion tree and git
-Usage: git svn <command> [options] [arguments]\n
+usage: git svn <command> [options] [arguments]\n
 
 	print $fd "Available commands:\n" unless $cmd;
 
@@ -428,6 +433,7 @@ sub ask {
 	my $default = $arg{default};
 	my $resp;
 	my $i = 0;
+	term_init() unless $term;
 
 	if ( !( defined($term->IN)
             && defined( fileno($term->IN) )
@@ -477,6 +483,9 @@ sub do_git_init_db {
 	my $ignore_paths_regex = \$Git::SVN::Fetcher::_ignore_regex;
 	command_noisy('config', "$pfx.ignore-paths", $$ignore_paths_regex)
 		if defined $$ignore_paths_regex;
+	my $include_paths_regex = \$Git::SVN::Fetcher::_include_regex;
+	command_noisy('config', "$pfx.include-paths", $$include_paths_regex)
+		if defined $$include_paths_regex;
 	my $ignore_refs_regex = \$Git::SVN::Ra::_ignore_refs_regex;
 	command_noisy('config', "$pfx.ignore-refs", $$ignore_refs_regex)
 		if defined $$ignore_refs_regex;
@@ -541,7 +550,7 @@ sub cmd_fetch {
 	}
 	my ($remote) = @_;
 	if (@_ > 1) {
-		die "Usage: $0 fetch [--all] [--parent] [svn-remote]\n";
+		die "usage: $0 fetch [--all] [--parent] [svn-remote]\n";
 	}
 	$Git::SVN::no_reuse_existing = undef;
 	if ($_fetch_parent) {
@@ -676,11 +685,13 @@ sub merge_revs_into_hash {
 }
 
 sub merge_merge_info {
-	my ($mergeinfo_one, $mergeinfo_two) = @_;
+	my ($mergeinfo_one, $mergeinfo_two, $ignore_branch) = @_;
 	my %result_hash = ();
 
 	merge_revs_into_hash(\%result_hash, $mergeinfo_one);
 	merge_revs_into_hash(\%result_hash, $mergeinfo_two);
+
+	delete $result_hash{$ignore_branch} if $ignore_branch;
 
 	my $result = '';
 	# Sort below is for consistency's sake
@@ -702,6 +713,7 @@ sub populate_merge_info {
 		my $all_parents_ok = 1;
 		my $aggregate_mergeinfo = '';
 		my $rooturl = $gs->repos_root;
+		my ($target_branch) = $gs->full_pushurl =~ /^\Q$rooturl\E(.*)/;
 
 		if (defined($rewritten_parent)) {
 			# Replace first parent with newly-rewritten version
@@ -733,7 +745,8 @@ sub populate_merge_info {
 			# Merge previous mergeinfo values
 			$aggregate_mergeinfo =
 				merge_merge_info($aggregate_mergeinfo,
-								 $par_mergeinfo, 0);
+								$par_mergeinfo,
+								$target_branch);
 
 			next if $parent eq $parents[0]; # Skip first parent
 			# Add new changes being placed in tree by merge
@@ -776,7 +789,8 @@ sub populate_merge_info {
 			my $newmergeinfo = "$branchpath:" . join(',', @revsin);
 			$aggregate_mergeinfo =
 				merge_merge_info($aggregate_mergeinfo,
-								 $newmergeinfo, 1);
+								$newmergeinfo,
+								$target_branch);
 		}
 		if ($all_parents_ok and $aggregate_mergeinfo) {
 			return $aggregate_mergeinfo;
@@ -827,7 +841,7 @@ sub dcommit_rebase {
 sub cmd_dcommit {
 	my $head = shift;
 	command_noisy(qw/update-index --refresh/);
-	git_cmd_try { command_oneline(qw/diff-index --quiet HEAD/) }
+	git_cmd_try { command_oneline(qw/diff-index --quiet HEAD --/) }
 		'Cannot dcommit with a dirty index.  Commit your changes first, '
 		. "or stash them with `git stash'.\n";
 	$head ||= 'HEAD';
@@ -1155,9 +1169,12 @@ sub cmd_branch {
 	}
 
 	::_req_svn();
+	require SVN::Client;
 
 	my $ctx = SVN::Client->new(
-		auth    => Git::SVN::Ra::_auth_providers(),
+		config => SVN::Core::config_get_config(
+			$Git::SVN::Ra::config_dir
+		),
 		log_msg => sub {
 			${ $_[0] } = defined $_message
 				? $_message
@@ -1170,11 +1187,26 @@ sub cmd_branch {
 		$ctx->ls($dst, 'HEAD', 0);
 	} and die "branch ${branch_name} already exists\n";
 
+	if ($_parents) {
+		mk_parent_dirs($ctx, $dst);
+	}
+
 	print "Copying ${src} at r${rev} to ${dst}...\n";
 	$ctx->copy($src, $rev, $dst)
 		unless $_dry_run;
 
 	$gs->fetch_all;
+}
+
+sub mk_parent_dirs {
+	my ($ctx, $parent) = @_;
+	$parent =~ s{/[^/]*$}{};
+
+	if (!eval{$ctx->ls($parent, 'HEAD', 0)}) {
+		mk_parent_dirs($ctx, $parent);
+		print "Creating parent folder ${parent} ...\n";
+		$ctx->mkdir($parent) unless $_dry_run;
+	}
 }
 
 sub cmd_find_rev {
@@ -1191,7 +1223,13 @@ sub cmd_find_rev {
 			    "$head history\n";
 		}
 		my $desired_revision = substr($revision_or_hash, 1);
-		$result = $gs->rev_map_get($desired_revision, $uuid);
+		if ($_before) {
+			$result = $gs->find_rev_before($desired_revision, 1);
+		} elsif ($_after) {
+			$result = $gs->find_rev_after($desired_revision, 1);
+		} else {
+			$result = $gs->rev_map_get($desired_revision, $uuid);
+		}
 	} else {
 		my (undef, $rev, undef) = cmt_metadata($revision_or_hash);
 		$result = $rev;
@@ -1221,7 +1259,7 @@ sub cmd_rebase {
 		return;
 	}
 	if (command(qw/diff-index HEAD --/)) {
-		print STDERR "Cannot rebase with uncommited changes:\n";
+		print STDERR "Cannot rebase with uncommitted changes:\n";
 		command_noisy('status');
 		exit 1;
 	}
@@ -1345,6 +1383,49 @@ sub cmd_propget {
 	print $props->{$prop} . "\n";
 }
 
+# cmd_propset (PROPNAME, PROPVAL, PATH)
+# ------------------------
+# Adjust the SVN property PROPNAME to PROPVAL for PATH.
+sub cmd_propset {
+	my ($propname, $propval, $path) = @_;
+	$path = '.' if not defined $path;
+	$path = $cmd_dir_prefix . $path;
+	usage(1) if not defined $propname;
+	usage(1) if not defined $propval;
+	my $file = basename($path);
+	my $dn = dirname($path);
+	my $cur_props = Git::SVN::Editor::check_attr( "svn-properties", $path );
+	my @new_props;
+	if (!$cur_props || $cur_props eq "unset" || $cur_props eq "" || $cur_props eq "set") {
+		push @new_props, "$propname=$propval";
+	} else {
+		# TODO: handle combining properties better
+		my @props = split(/;/, $cur_props);
+		my $replaced_prop;
+		foreach my $prop (@props) {
+			# Parse 'name=value' syntax and set the property.
+			if ($prop =~ /([^=]+)=(.*)/) {
+				my ($n,$v) = ($1,$2);
+				if ($n eq $propname) {
+					$v = $propval;
+					$replaced_prop = 1;
+				}
+				push @new_props, "$n=$v";
+			}
+		}
+		if (!$replaced_prop) {
+			push @new_props, "$propname=$propval";
+		}
+	}
+	my $attrfile = "$dn/.gitattributes";
+	open my $attrfh, '>>', $attrfile or die "Can't open $attrfile: $!\n";
+	# TODO: don't simply append here if $file already has svn-properties
+	my $new_props = join(';', @new_props);
+	print $attrfh "$file svn-properties=$new_props\n" or
+		die "write to $attrfile: $!\n";
+	close $attrfh or die "close $attrfile: $!\n";
+}
+
 # cmd_proplist (PATH)
 # -------------------
 # Print the list of SVN properties for PATH.
@@ -1364,7 +1445,7 @@ sub cmd_multi_init {
 		usage(1);
 	}
 
-	$_prefix = '' unless defined $_prefix;
+	$_prefix = 'origin/' unless defined $_prefix;
 	if (defined $url) {
 		$url = canonicalize_url($url);
 		init_subdir(@_);
@@ -1405,7 +1486,7 @@ sub cmd_multi_fetch {
 # this command is special because it requires no metadata
 sub cmd_commit_diff {
 	my ($ta, $tb, $url) = @_;
-	my $usage = "Usage: $0 commit-diff -r<revision> ".
+	my $usage = "usage: $0 commit-diff -r<revision> ".
 	            "<tree-ish> <tree-ish> [<URL>]";
 	fatal($usage) if (!defined $ta || !defined $tb);
 	my $svn_path = '';
@@ -1450,10 +1531,37 @@ sub cmd_commit_diff {
 	}
 }
 
-
 sub cmd_info {
-	my $path = canonicalize_path(defined($_[0]) ? $_[0] : ".");
-	my $fullpath = canonicalize_path($cmd_dir_prefix . $path);
+	my $path_arg = defined($_[0]) ? $_[0] : '.';
+	my $path = $path_arg;
+	if (File::Spec->file_name_is_absolute($path)) {
+		$path = canonicalize_path($path);
+
+		my $toplevel = eval {
+			my @cmd = qw/rev-parse --show-toplevel/;
+			command_oneline(\@cmd, STDERR => 0);
+		};
+
+		# remove $toplevel from the absolute path:
+		my ($vol, $dirs, $file) = File::Spec->splitpath($path);
+		my (undef, $tdirs, $tfile) = File::Spec->splitpath($toplevel);
+		my @dirs = File::Spec->splitdir($dirs);
+		my @tdirs = File::Spec->splitdir($tdirs);
+		pop @dirs if $dirs[-1] eq '';
+		pop @tdirs if $tdirs[-1] eq '';
+		push @dirs, $file;
+		push @tdirs, $tfile;
+		while (@tdirs && @dirs && $tdirs[0] eq $dirs[0]) {
+			shift @dirs;
+			shift @tdirs;
+		}
+		$dirs = File::Spec->catdir(@dirs);
+		$path = File::Spec->catpath($vol, $dirs);
+
+		$path = canonicalize_path($path);
+	} else {
+		$path = canonicalize_path($cmd_dir_prefix . $path);
+	}
 	if (exists $_[1]) {
 		die "Too many arguments specified\n";
 	}
@@ -1474,14 +1582,14 @@ sub cmd_info {
 	# canonicalize_path() will return "" to make libsvn 1.5.x happy,
 	$path = "." if $path eq "";
 
-	my $full_url = canonicalize_url( add_path_to_url( $url, $fullpath ) );
+	my $full_url = canonicalize_url( add_path_to_url( $url, $path ) );
 
 	if ($_url) {
 		print "$full_url\n";
 		return;
 	}
 
-	my $result = "Path: $path\n";
+	my $result = "Path: $path_arg\n";
 	$result .= "Name: " . basename($path) . "\n" if $file_type ne "dir";
 	$result .= "URL: $full_url\n";
 
@@ -1512,7 +1620,7 @@ sub cmd_info {
 	}
 
 	my ($lc_author, $lc_rev, $lc_date_utc);
-	my @args = Git::SVN::Log::git_svn_log_cmd($rev, $rev, "--", $fullpath);
+	my @args = Git::SVN::Log::git_svn_log_cmd($rev, $rev, "--", $path);
 	my $log = command_output_pipe(@args);
 	my $esc_color = qr/(?:\033\[(?:(?:\d+;)*\d*)?m)*/;
 	while (<$log>) {
@@ -1582,11 +1690,13 @@ sub cmd_reset {
 }
 
 sub cmd_gc {
+	require File::Find;
 	if (!can_compress()) {
 		warn "Compress::Zlib could not be found; unhandled.log " .
 		     "files will not be compressed.\n";
 	}
-	find({ wanted => \&gc_directory, no_chdir => 1}, "$ENV{GIT_DIR}/svn");
+	File::Find::find({ wanted => \&gc_directory, no_chdir => 1},
+			 "$ENV{GIT_DIR}/svn");
 }
 
 ########################### utility functions #########################
@@ -1734,7 +1844,7 @@ sub get_commit_entry {
 		my $msgbuf = "";
 		while (<$msg_fh>) {
 			if (!$in_msg) {
-				$in_msg = 1 if (/^\s*$/);
+				$in_msg = 1 if (/^$/);
 				$author = $1 if (/^author (.*>)/);
 			} elsif (/^git-svn-id: /) {
 				# skip this for now, we regenerate the
@@ -1814,7 +1924,7 @@ sub load_authors {
 	my $log = $cmd eq 'log';
 	while (<$authors>) {
 		chomp;
-		next unless /^(.+?|\(no author\))\s*=\s*(.+?)\s*<(.+)>\s*$/;
+		next unless /^(.+?|\(no author\))\s*=\s*(.+?)\s*<(.*)>\s*$/;
 		my ($user, $name, $email) = ($1, $2, $3);
 		if ($log) {
 			$Git::SVN::Log::rusers{"$name <$email>"} = $user;
@@ -1907,7 +2017,7 @@ sub cmt_sha2rev_batch {
 sub working_head_info {
 	my ($head, $refs) = @_;
 	my @args = qw/rev-list --first-parent --pretty=medium/;
-	my ($fh, $ctx) = command_output_pipe(@args, $head);
+	my ($fh, $ctx) = command_output_pipe(@args, $head, "--");
 	my $hash;
 	my %max;
 	while (<$fh>) {
@@ -2011,6 +2121,7 @@ sub find_file_type_and_diff_status {
 sub md5sum {
 	my $arg = shift;
 	my $ref = ref $arg;
+	require Digest::MD5;
 	my $md5 = Digest::MD5->new();
         if ($ref eq 'GLOB' || $ref eq 'IO::File' || $ref eq 'File::Temp') {
 		$md5->addfile($arg) or croak $!;
@@ -2037,6 +2148,7 @@ sub gc_directory {
 			$gz->gzwrite($str) or
 				die "Unable to write: ".$gz->gzerror()."!\n";
 		}
+		no warnings 'once'; # $File::Find::name would warn
 		unlink $_ or die "unlink $File::Find::name: $!\n";
 	} elsif (-f $_ && basename($_) eq "index") {
 		unlink $_ or die "unlink $_: $!\n";

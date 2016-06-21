@@ -1,9 +1,9 @@
 #include "builtin.h"
 #include "parse-options.h"
-#include "pack-refs.h"
+#include "refs.h"
 
 static char const * const pack_refs_usage[] = {
-	N_("git pack-refs [options]"),
+	N_("git pack-refs [<options>]"),
 	NULL
 };
 

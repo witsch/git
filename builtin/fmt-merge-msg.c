@@ -1,5 +1,6 @@
 #include "builtin.h"
 #include "cache.h"
+#include "refs.h"
 #include "commit.h"
 #include "diff.h"
 #include "revision.h"
@@ -10,7 +11,7 @@
 #include "gpg-interface.h"
 
 static const char * const fmt_merge_msg_usage[] = {
-	N_("git fmt-merge-msg [-m <message>] [--log[=<n>]|--no-log] [--file <file>]"),
+	N_("git fmt-merge-msg [-m <message>] [--log[=<n>] | --no-log] [--file <file>]"),
 	NULL
 };
 
@@ -100,7 +101,8 @@ static int handle_line(char *line, struct merge_parents *merge_parents)
 {
 	int i, len = strlen(line);
 	struct origin_data *origin_data;
-	char *src, *origin;
+	char *src;
+	const char *origin;
 	struct src_data *src_data;
 	struct string_list_item *item;
 	int pulling_head = 0;
@@ -109,7 +111,7 @@ static int handle_line(char *line, struct merge_parents *merge_parents)
 	if (len < 43 || line[40] != '\t')
 		return 1;
 
-	if (!prefixcmp(line + 41, "not-for-merge"))
+	if (starts_with(line + 41, "not-for-merge"))
 		return 0;
 
 	if (line[41] != '\t')
@@ -155,17 +157,16 @@ static int handle_line(char *line, struct merge_parents *merge_parents)
 	if (pulling_head) {
 		origin = src;
 		src_data->head_status |= 1;
-	} else if (!prefixcmp(line, "branch ")) {
+	} else if (starts_with(line, "branch ")) {
 		origin_data->is_local_branch = 1;
 		origin = line + 7;
 		string_list_append(&src_data->branch, origin);
 		src_data->head_status |= 2;
-	} else if (!prefixcmp(line, "tag ")) {
+	} else if (starts_with(line, "tag ")) {
 		origin = line;
 		string_list_append(&src_data->tag, origin + 4);
 		src_data->head_status |= 2;
-	} else if (!prefixcmp(line, "remote-tracking branch ")) {
-		origin = line + strlen("remote-tracking branch ");
+	} else if (skip_prefix(line, "remote-tracking branch ", &origin)) {
 		string_list_append(&src_data->r_branch, origin);
 		src_data->head_status |= 2;
 	} else {
@@ -178,11 +179,8 @@ static int handle_line(char *line, struct merge_parents *merge_parents)
 		int len = strlen(origin);
 		if (origin[0] == '\'' && origin[len - 1] == '\'')
 			origin = xmemdupz(origin + 1, len - 2);
-	} else {
-		char *new_origin = xmalloc(strlen(origin) + strlen(src) + 5);
-		sprintf(new_origin, "%s of %s", origin, src);
-		origin = new_origin;
-	}
+	} else
+		origin = xstrfmt("%s of %s", origin, src);
 	if (strcmp(".", src))
 		origin_data->is_local_branch = 0;
 	string_list_append(&origins, origin)->util = origin_data;
@@ -219,22 +217,22 @@ static void add_branch_desc(struct strbuf *out, const char *name)
 			strbuf_addf(out, "  : %.*s", (int)(ep - bp), bp);
 			bp = ep;
 		}
-		if (out->buf[out->len - 1] != '\n')
-			strbuf_addch(out, '\n');
+		strbuf_complete_line(out);
 	}
 	strbuf_release(&desc);
 }
 
 #define util_as_integral(elem) ((intptr_t)((elem)->util))
 
-static void record_person(int which, struct string_list *people,
-			  struct commit *commit)
+static void record_person_from_buf(int which, struct string_list *people,
+				   const char *buffer)
 {
 	char *name_buf, *name, *name_end;
 	struct string_list_item *elem;
-	const char *field = (which == 'a') ? "\nauthor " : "\ncommitter ";
+	const char *field;
 
-	name = strstr(commit->buffer, field);
+	field = (which == 'a') ? "\nauthor " : "\ncommitter ";
+	name = strstr(buffer, field);
 	if (!name)
 		return;
 	name += strlen(field);
@@ -254,6 +252,15 @@ static void record_person(int which, struct string_list *people,
 	}
 	elem->util = (void*)(util_as_integral(elem) + 1);
 	free(name_buf);
+}
+
+
+static void record_person(int which, struct string_list *people,
+			  struct commit *commit)
+{
+	const char *buffer = get_commit_buffer(commit, NULL);
+	record_person_from_buf(which, people, buffer);
+	unuse_commit_buffer(commit, buffer);
 }
 
 static int cmp_string_list_util_as_integral(const void *a_, const void *b_)
@@ -286,20 +293,20 @@ static void credit_people(struct strbuf *out,
 	const char *me;
 
 	if (kind == 'a') {
-		label = "\n# By ";
+		label = "By";
 		me = git_author_info(IDENT_NO_DATE);
 	} else {
-		label = "\n# Via ";
+		label = "Via";
 		me = git_committer_info(IDENT_NO_DATE);
 	}
 
 	if (!them->nr ||
 	    (them->nr == 1 &&
 	     me &&
-	     (me = skip_prefix(me, them->items->string)) != NULL &&
-	     skip_prefix(me, " <")))
+	     skip_prefix(me, them->items->string, &me) &&
+	     starts_with(me, " <")))
 		return;
-	strbuf_addstr(out, label);
+	strbuf_addf(out, "\n%c %s ", comment_line_char, label);
 	add_people_count(out, them);
 }
 
@@ -323,7 +330,8 @@ static void add_people_info(struct strbuf *out,
 static void shortlog(const char *name,
 		     struct origin_data *origin_data,
 		     struct commit *head,
-		     struct rev_info *rev, int limit,
+		     struct rev_info *rev,
+		     struct fmt_merge_msg_opts *opts,
 		     struct strbuf *out)
 {
 	int i, count = 0;
@@ -335,6 +343,7 @@ static void shortlog(const char *name,
 	int flags = UNINTERESTING | TREESAME | SEEN | SHOWN | ADDED;
 	struct strbuf sb = STRBUF_INIT;
 	const unsigned char *sha1 = origin_data->sha1;
+	int limit = opts->shortlog_len;
 
 	branch = deref_tag(parse_object(sha1), sha1_to_hex(sha1), 40);
 	if (!branch || branch->type != OBJ_COMMIT)
@@ -351,13 +360,15 @@ static void shortlog(const char *name,
 
 		if (commit->parents && commit->parents->next) {
 			/* do not list a merge but count committer */
-			record_person('c', &committers, commit);
+			if (opts->credit_people)
+				record_person('c', &committers, commit);
 			continue;
 		}
-		if (!count)
+		if (!count && opts->credit_people)
 			/* the 'tip' committer */
 			record_person('c', &committers, commit);
-		record_person('a', &authors, commit);
+		if (opts->credit_people)
+			record_person('a', &authors, commit);
 		count++;
 		if (subjects.nr > limit)
 			continue;
@@ -367,12 +378,13 @@ static void shortlog(const char *name,
 
 		if (!sb.len)
 			string_list_append(&subjects,
-					   sha1_to_hex(commit->object.sha1));
+					   oid_to_hex(&commit->object.oid));
 		else
 			string_list_append(&subjects, strbuf_detach(&sb, NULL));
 	}
 
-	add_people_info(out, &authors, &committers);
+	if (opts->credit_people)
+		add_people_info(out, &authors, &committers);
 	if (count > limit)
 		strbuf_addf(out, "\n* %s: (%d commits)\n", name, count);
 	else
@@ -464,7 +476,7 @@ static void fmt_tag_signature(struct strbuf *tagbuf,
 	strbuf_complete_line(tagbuf);
 	if (sig->len) {
 		strbuf_addch(tagbuf, '\n');
-		strbuf_add_lines(tagbuf, "# ", sig->buf, sig->len);
+		strbuf_add_commented_lines(tagbuf, sig->buf, sig->len);
 	}
 }
 
@@ -486,7 +498,7 @@ static void fmt_merge_msg_sigs(struct strbuf *out)
 
 		if (size == len)
 			; /* merely annotated */
-		else if (verify_signed_buffer(buf, len, buf + len, size - len, &sig)) {
+		else if (verify_signed_buffer(buf, len, buf + len, size - len, &sig, NULL)) {
 			if (!sig.len)
 				strbuf_addstr(&sig, "gpg verification failed.\n");
 		}
@@ -497,14 +509,18 @@ static void fmt_merge_msg_sigs(struct strbuf *out)
 		} else {
 			if (tag_number == 2) {
 				struct strbuf tagline = STRBUF_INIT;
-				strbuf_addf(&tagline, "\n# %s\n",
-					    origins.items[first_tag].string);
+				strbuf_addch(&tagline, '\n');
+				strbuf_add_commented_lines(&tagline,
+						origins.items[first_tag].string,
+						strlen(origins.items[first_tag].string));
 				strbuf_insert(&tagbuf, 0, tagline.buf,
 					      tagline.len);
 				strbuf_release(&tagline);
 			}
-			strbuf_addf(&tagbuf, "\n# %s\n",
-				    origins.items[i].string);
+			strbuf_addch(&tagbuf, '\n');
+			strbuf_add_commented_lines(&tagbuf,
+					origins.items[i].string,
+					strlen(origins.items[i].string));
 			fmt_tag_signature(&tagbuf, &sig, buf, len);
 		}
 		strbuf_release(&sig);
@@ -521,7 +537,7 @@ static void fmt_merge_msg_sigs(struct strbuf *out)
 static void find_merge_parents(struct merge_parents *result,
 			       struct strbuf *in, unsigned char *head)
 {
-	struct commit_list *parents, *next;
+	struct commit_list *parents;
 	struct commit *head_commit;
 	int pos = 0, i, j;
 
@@ -552,7 +568,7 @@ static void find_merge_parents(struct merge_parents *result,
 		if (!parent)
 			continue;
 		commit_list_insert(parent, &parents);
-		add_merge_parent(result, obj->sha1, parent->object.sha1);
+		add_merge_parent(result, obj->oid.hash, parent->object.oid.hash);
 	}
 	head_commit = lookup_commit(head);
 	if (head_commit)
@@ -560,13 +576,10 @@ static void find_merge_parents(struct merge_parents *result,
 	parents = reduce_heads(parents);
 
 	while (parents) {
+		struct commit *cmit = pop_commit(&parents);
 		for (i = 0; i < result->nr; i++)
-			if (!hashcmp(result->item[i].commit,
-				     parents->item->object.sha1))
+			if (!hashcmp(result->item[i].commit, cmit->object.oid.hash))
 				result->item[i].used = 1;
-		next = parents->next;
-		free(parents);
-		parents = next;
 	}
 
 	for (i = j = 0; i < result->nr; i++) {
@@ -592,10 +605,10 @@ int fmt_merge_msg(struct strbuf *in, struct strbuf *out,
 
 	/* get current branch */
 	current_branch = current_branch_to_free =
-		resolve_refdup("HEAD", head_sha1, 1, NULL);
+		resolve_refdup("HEAD", RESOLVE_REF_READING, head_sha1, NULL);
 	if (!current_branch)
 		die("No current branch");
-	if (!prefixcmp(current_branch, "refs/heads/"))
+	if (starts_with(current_branch, "refs/heads/"))
 		current_branch += 11;
 
 	find_merge_parents(&merge_parents, in, head_sha1);
@@ -635,7 +648,7 @@ int fmt_merge_msg(struct strbuf *in, struct strbuf *out,
 		for (i = 0; i < origins.nr; i++)
 			shortlog(origins.items[i].string,
 				 origins.items[i].util,
-				 head, &rev, opts->shortlog_len, out);
+				 head, &rev, opts, out);
 	}
 
 	strbuf_complete_line(out);
@@ -690,6 +703,7 @@ int cmd_fmt_merge_msg(int argc, const char **argv, const char *prefix)
 
 	memset(&opts, 0, sizeof(opts));
 	opts.add_title = !message;
+	opts.credit_people = 1;
 	opts.shortlog_len = shortlog_len;
 
 	ret = fmt_merge_msg(&input, &output, &opts);

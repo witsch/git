@@ -3,6 +3,7 @@
 test_description='git log'
 
 . ./test-lib.sh
+. "$TEST_DIRECTORY/lib-gpg.sh"
 
 test_expect_success setup '
 
@@ -72,9 +73,9 @@ cat > expect << EOF
   commit.
 EOF
 
-test_expect_success 'format %w(12,1,2)' '
+test_expect_success 'format %w(11,1,2)' '
 
-	git log -2 --format="%w(12,1,2)This is the %s commit." > actual &&
+	git log -2 --format="%w(11,1,2)This is the %s commit." > actual &&
 	test_cmp expect actual
 '
 
@@ -112,11 +113,7 @@ test_expect_success 'diff-filter=M' '
 
 	actual=$(git log --pretty="format:%s" --diff-filter=M HEAD) &&
 	expect=$(echo second) &&
-	test "$actual" = "$expect" || {
-		echo Oops
-		echo "Actual: $actual"
-		false
-	}
+	verbose test "$actual" = "$expect"
 
 '
 
@@ -124,11 +121,7 @@ test_expect_success 'diff-filter=D' '
 
 	actual=$(git log --pretty="format:%s" --diff-filter=D HEAD) &&
 	expect=$(echo sixth ; echo third) &&
-	test "$actual" = "$expect" || {
-		echo Oops
-		echo "Actual: $actual"
-		false
-	}
+	verbose test "$actual" = "$expect"
 
 '
 
@@ -136,11 +129,7 @@ test_expect_success 'diff-filter=R' '
 
 	actual=$(git log -M --pretty="format:%s" --diff-filter=R HEAD) &&
 	expect=$(echo third) &&
-	test "$actual" = "$expect" || {
-		echo Oops
-		echo "Actual: $actual"
-		false
-	}
+	verbose test "$actual" = "$expect"
 
 '
 
@@ -148,11 +137,7 @@ test_expect_success 'diff-filter=C' '
 
 	actual=$(git log -C -C --pretty="format:%s" --diff-filter=C HEAD) &&
 	expect=$(echo fourth) &&
-	test "$actual" = "$expect" || {
-		echo Oops
-		echo "Actual: $actual"
-		false
-	}
+	verbose test "$actual" = "$expect"
 
 '
 
@@ -160,12 +145,31 @@ test_expect_success 'git log --follow' '
 
 	actual=$(git log --follow --pretty="format:%s" ichi) &&
 	expect=$(echo third ; echo second ; echo initial) &&
-	test "$actual" = "$expect" || {
-		echo Oops
-		echo "Actual: $actual"
-		false
-	}
+	verbose test "$actual" = "$expect"
+'
 
+test_expect_success 'git config log.follow works like --follow' '
+	test_config log.follow true &&
+	actual=$(git log --pretty="format:%s" ichi) &&
+	expect=$(echo third ; echo second ; echo initial) &&
+	verbose test "$actual" = "$expect"
+'
+
+test_expect_success 'git config log.follow does not die with multiple paths' '
+	test_config log.follow true &&
+	git log --pretty="format:%s" ichi ein
+'
+
+test_expect_success 'git config log.follow does not die with no paths' '
+	test_config log.follow true &&
+	git log --
+'
+
+test_expect_success 'git config log.follow is overridden by --no-follow' '
+	test_config log.follow true &&
+	actual=$(git log --no-follow --pretty="format:%s" ichi) &&
+	expect="third" &&
+	verbose test "$actual" = "$expect"
 '
 
 cat > expect << EOF
@@ -211,6 +215,21 @@ test_expect_success 'log --grep' '
 	test_cmp expect actual
 '
 
+cat > expect << EOF
+second
+initial
+EOF
+test_expect_success 'log --invert-grep --grep' '
+	git log --pretty="tformat:%s" --invert-grep --grep=th --grep=Sec >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'log --invert-grep --grep -i' '
+	echo initial >expect &&
+	git log --pretty="tformat:%s" --invert-grep -i --grep=th --grep=Sec >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'log --grep option parsing' '
 	echo second >expect &&
 	git log -1 --pretty="tformat:%s" --grep sec >actual &&
@@ -227,6 +246,12 @@ test_expect_success 'log -i --grep' '
 test_expect_success 'log --grep -i' '
 	echo Second >expect &&
 	git log -1 --pretty="tformat:%s" --grep=sec -i >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'log -F -E --grep=<ere> uses ere' '
+	echo second >expect &&
+	git log -1 --pretty="tformat:%s" -F -E --grep=s.c.nd >actual &&
 	test_cmp expect actual
 '
 
@@ -272,6 +297,16 @@ test_expect_success 'log --graph with merge' '
 	git log --graph --date-order --pretty=tformat:%s |
 		sed "s/ *\$//" >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'log --raw --graph -m with merge' '
+	git log --raw --graph --oneline -m master | head -n 500 >actual &&
+	grep "initial" actual
+'
+
+test_expect_success 'diff-tree --graph' '
+	git diff-tree --graph master^ | head -n 500 >actual &&
+	grep "one" actual
 '
 
 cat > expect <<\EOF
@@ -403,8 +438,6 @@ test_expect_success 'log --graph with merge' '
 '
 
 test_expect_success 'log.decorate configuration' '
-	test_might_fail git config --unset-all log.decorate &&
-
 	git log --oneline >expect.none &&
 	git log --oneline --decorate >expect.short &&
 	git log --oneline --decorate=full >expect.full &&
@@ -413,8 +446,7 @@ test_expect_success 'log.decorate configuration' '
 	git log --oneline >actual &&
 	test_cmp expect.short actual &&
 
-	git config --unset-all log.decorate &&
-	git config log.decorate true &&
+	test_config log.decorate true &&
 	git log --oneline >actual &&
 	test_cmp expect.short actual &&
 	git log --oneline --decorate=full >actual &&
@@ -422,8 +454,7 @@ test_expect_success 'log.decorate configuration' '
 	git log --oneline --decorate=no >actual &&
 	test_cmp expect.none actual &&
 
-	git config --unset-all log.decorate &&
-	git config log.decorate no &&
+	test_config log.decorate no &&
 	git log --oneline >actual &&
 	test_cmp expect.none actual &&
 	git log --oneline --decorate >actual &&
@@ -431,8 +462,7 @@ test_expect_success 'log.decorate configuration' '
 	git log --oneline --decorate=full >actual &&
 	test_cmp expect.full actual &&
 
-	git config --unset-all log.decorate &&
-	git config log.decorate 1 &&
+	test_config log.decorate 1 &&
 	git log --oneline >actual &&
 	test_cmp expect.short actual &&
 	git log --oneline --decorate=full >actual &&
@@ -440,8 +470,7 @@ test_expect_success 'log.decorate configuration' '
 	git log --oneline --decorate=no >actual &&
 	test_cmp expect.none actual &&
 
-	git config --unset-all log.decorate &&
-	git config log.decorate short &&
+	test_config log.decorate short &&
 	git log --oneline >actual &&
 	test_cmp expect.short actual &&
 	git log --oneline --no-decorate >actual &&
@@ -449,25 +478,23 @@ test_expect_success 'log.decorate configuration' '
 	git log --oneline --decorate=full >actual &&
 	test_cmp expect.full actual &&
 
-	git config --unset-all log.decorate &&
-	git config log.decorate full &&
+	test_config log.decorate full &&
 	git log --oneline >actual &&
 	test_cmp expect.full actual &&
 	git log --oneline --no-decorate >actual &&
 	test_cmp expect.none actual &&
 	git log --oneline --decorate >actual &&
-	test_cmp expect.short actual
+	test_cmp expect.short actual &&
 
-	git config --unset-all log.decorate &&
+	test_unconfig log.decorate &&
 	git log --pretty=raw >expect.raw &&
-	git config log.decorate full &&
+	test_config log.decorate full &&
 	git log --pretty=raw >actual &&
 	test_cmp expect.raw actual
 
 '
 
 test_expect_success 'reflog is expected format' '
-	test_might_fail git config --remove-section log &&
 	git log -g --abbrev-commit --pretty=oneline >expect &&
 	git reflog >actual &&
 	test_cmp expect actual
@@ -480,10 +507,6 @@ test_expect_success 'whatchanged is expected format' '
 '
 
 test_expect_success 'log.abbrevCommit configuration' '
-	test_when_finished "git config --unset log.abbrevCommit" &&
-
-	test_might_fail git config --unset log.abbrevCommit &&
-
 	git log --abbrev-commit >expect.log.abbrev &&
 	git log --no-abbrev-commit >expect.log.full &&
 	git log --pretty=raw >expect.log.raw &&
@@ -492,7 +515,7 @@ test_expect_success 'log.abbrevCommit configuration' '
 	git whatchanged --abbrev-commit >expect.whatchanged.abbrev &&
 	git whatchanged --no-abbrev-commit >expect.whatchanged.full &&
 
-	git config log.abbrevCommit true &&
+	test_config log.abbrevCommit true &&
 
 	git log >actual &&
 	test_cmp expect.log.abbrev actual &&
@@ -523,6 +546,20 @@ test_expect_success 'show added path under "--follow -M"' '
 		git log -M --follow -p foo.bar.t &&
 		git log -M --follow --stat foo.bar.t &&
 		git log -M --follow --name-only foo.bar.t
+	)
+'
+
+test_expect_success 'git log -c --follow' '
+	test_create_repo follow-c &&
+	(
+		cd follow-c &&
+		test_commit initial file original &&
+		git rm file &&
+		test_commit rename file2 original &&
+		git reset --hard initial &&
+		test_commit modify file foo &&
+		git merge -m merge rename &&
+		git log -c --follow file2
 	)
 '
 
@@ -820,6 +857,83 @@ test_expect_success 'dotdot is a parent directory' '
 	mkdir -p a/b &&
 	( echo sixth && echo fifth ) >expect &&
 	( cd a/b && git log --format=%s .. ) >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success GPG 'log --graph --show-signature' '
+	test_when_finished "git reset --hard && git checkout master" &&
+	git checkout -b signed master &&
+	echo foo >foo &&
+	git add foo &&
+	git commit -S -m signed_commit &&
+	git log --graph --show-signature -n1 signed >actual &&
+	grep "^| gpg: Signature made" actual &&
+	grep "^| gpg: Good signature" actual
+'
+
+test_expect_success GPG 'log --graph --show-signature for merged tag' '
+	test_when_finished "git reset --hard && git checkout master" &&
+	git checkout -b plain master &&
+	echo aaa >bar &&
+	git add bar &&
+	git commit -m bar_commit &&
+	git checkout -b tagged master &&
+	echo bbb >baz &&
+	git add baz &&
+	git commit -m baz_commit &&
+	git tag -s -m signed_tag_msg signed_tag &&
+	git checkout plain &&
+	git merge --no-ff -m msg signed_tag &&
+	git log --graph --show-signature -n1 plain >actual &&
+	grep "^|\\\  merged tag" actual &&
+	grep "^| | gpg: Signature made" actual &&
+	grep "^| | gpg: Good signature" actual
+'
+
+test_expect_success 'log --graph --no-walk is forbidden' '
+	test_must_fail git log --graph --no-walk
+'
+
+test_expect_success 'log diagnoses bogus HEAD' '
+	git init empty &&
+	test_must_fail git -C empty log 2>stderr &&
+	test_i18ngrep does.not.have.any.commits stderr &&
+	echo 1234abcd >empty/.git/refs/heads/master &&
+	test_must_fail git -C empty log 2>stderr &&
+	test_i18ngrep broken stderr &&
+	echo "ref: refs/heads/invalid.lock" >empty/.git/HEAD &&
+	test_must_fail git -C empty log 2>stderr &&
+	test_i18ngrep broken stderr &&
+	test_must_fail git -C empty log --default totally-bogus 2>stderr &&
+	test_i18ngrep broken stderr
+'
+
+test_expect_success 'set up --source tests' '
+	git checkout --orphan source-a &&
+	test_commit one &&
+	test_commit two &&
+	git checkout -b source-b HEAD^ &&
+	test_commit three
+'
+
+test_expect_success 'log --source paints branch names' '
+	cat >expect <<-\EOF &&
+	09e12a9	source-b three
+	8e393e1	source-a two
+	1ac6c77	source-b one
+	EOF
+	git log --oneline --source source-a source-b >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'log --source paints tag names' '
+	git tag -m tagged source-tag &&
+	cat >expect <<-\EOF &&
+	09e12a9	source-tag three
+	8e393e1	source-a two
+	1ac6c77	source-tag one
+	EOF
+	git log --oneline --source source-tag source-a >actual &&
 	test_cmp expect actual
 '
 

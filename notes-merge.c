@@ -9,6 +9,7 @@
 #include "notes.h"
 #include "notes-merge.h"
 #include "strbuf.h"
+#include "notes-utils.h"
 
 struct notes_merge_pair {
 	unsigned char obj[20], base[20], local[20], remote[20];
@@ -169,7 +170,7 @@ static struct notes_merge_pair *diff_tree_remote(struct notes_merge_options *o,
 		       sha1_to_hex(mp->remote));
 	}
 	diff_flush(&opt);
-	diff_tree_release_paths(&opt);
+	free_pathspec(&opt.pathspec);
 
 	*num_changes = len;
 	return changes;
@@ -255,7 +256,7 @@ static void diff_tree_local(struct notes_merge_options *o,
 		       sha1_to_hex(mp->local));
 	}
 	diff_flush(&opt);
-	diff_tree_release_paths(&opt);
+	free_pathspec(&opt.pathspec);
 }
 
 static void check_notes_merge_worktree(struct notes_merge_options *o)
@@ -279,7 +280,7 @@ static void check_notes_merge_worktree(struct notes_merge_options *o)
 				    "(%s exists).", git_path("NOTES_MERGE_*"));
 		}
 
-		if (safe_create_leading_directories(git_path(
+		if (safe_create_leading_directories_const(git_path(
 				NOTES_MERGE_WORKTREE "/.test")))
 			die_errno("unable to create directory %s",
 				  git_path(NOTES_MERGE_WORKTREE));
@@ -294,8 +295,8 @@ static void write_buf_to_worktree(const unsigned char *obj,
 				  const char *buf, unsigned long size)
 {
 	int fd;
-	char *path = git_path(NOTES_MERGE_WORKTREE "/%s", sha1_to_hex(obj));
-	if (safe_create_leading_directories(path))
+	char *path = git_pathdup(NOTES_MERGE_WORKTREE "/%s", sha1_to_hex(obj));
+	if (safe_create_leading_directories_const(path))
 		die_errno("unable to create directory for '%s'", path);
 	if (file_exists(path))
 		die("found existing file at '%s'", path);
@@ -319,6 +320,7 @@ static void write_buf_to_worktree(const unsigned char *obj,
 	}
 
 	close(fd);
+	free(path);
 }
 
 static void write_note_to_worktree(const unsigned char *obj,
@@ -530,32 +532,6 @@ static int merge_from_diffs(struct notes_merge_options *o,
 	return conflicts ? -1 : 1;
 }
 
-void create_notes_commit(struct notes_tree *t, struct commit_list *parents,
-			 const struct strbuf *msg, unsigned char *result_sha1)
-{
-	unsigned char tree_sha1[20];
-
-	assert(t->initialized);
-
-	if (write_notes_tree(t, tree_sha1))
-		die("Failed to write notes tree to database");
-
-	if (!parents) {
-		/* Deduce parent commit from t->ref */
-		unsigned char parent_sha1[20];
-		if (!read_ref(t->ref, parent_sha1)) {
-			struct commit *parent = lookup_commit(parent_sha1);
-			if (!parent || parse_commit(parent))
-				die("Failed to find/parse commit %s", t->ref);
-			commit_list_insert(parent, &parents);
-		}
-		/* else: t->ref points to nothing, assume root/orphan commit */
-	}
-
-	if (commit_tree(msg, tree_sha1, parents, result_sha1, NULL, NULL))
-		die("Failed to commit notes tree to database");
-}
-
 int notes_merge(struct notes_merge_options *o,
 		struct notes_tree *local_tree,
 		unsigned char *result_sha1)
@@ -574,7 +550,7 @@ int notes_merge(struct notes_merge_options *o,
 	       o->local_ref, o->remote_ref);
 
 	/* Dereference o->local_ref into local_sha1 */
-	if (read_ref_full(o->local_ref, local_sha1, 0, NULL))
+	if (read_ref_full(o->local_ref, 0, local_sha1, NULL))
 		die("Failed to resolve local notes ref '%s'", o->local_ref);
 	else if (!check_refname_format(o->local_ref, 0) &&
 		is_null_sha1(local_sha1))
@@ -619,22 +595,22 @@ int notes_merge(struct notes_merge_options *o,
 	assert(local && remote);
 
 	/* Find merge bases */
-	bases = get_merge_bases(local, remote, 1);
+	bases = get_merge_bases(local, remote);
 	if (!bases) {
 		base_sha1 = null_sha1;
 		base_tree_sha1 = EMPTY_TREE_SHA1_BIN;
 		if (o->verbosity >= 4)
 			printf("No merge base found; doing history-less merge\n");
 	} else if (!bases->next) {
-		base_sha1 = bases->item->object.sha1;
-		base_tree_sha1 = bases->item->tree->object.sha1;
+		base_sha1 = bases->item->object.oid.hash;
+		base_tree_sha1 = bases->item->tree->object.oid.hash;
 		if (o->verbosity >= 4)
 			printf("One merge base found (%.7s)\n",
 				sha1_to_hex(base_sha1));
 	} else {
 		/* TODO: How to handle multiple merge-bases? */
-		base_sha1 = bases->item->object.sha1;
-		base_tree_sha1 = bases->item->tree->object.sha1;
+		base_sha1 = bases->item->object.oid.hash;
+		base_tree_sha1 = bases->item->tree->object.oid.hash;
 		if (o->verbosity >= 3)
 			printf("Multiple merge bases found. Using the first "
 				"(%.7s)\n", sha1_to_hex(base_sha1));
@@ -642,34 +618,35 @@ int notes_merge(struct notes_merge_options *o,
 
 	if (o->verbosity >= 4)
 		printf("Merging remote commit %.7s into local commit %.7s with "
-			"merge-base %.7s\n", sha1_to_hex(remote->object.sha1),
-			sha1_to_hex(local->object.sha1),
+			"merge-base %.7s\n", oid_to_hex(&remote->object.oid),
+			oid_to_hex(&local->object.oid),
 			sha1_to_hex(base_sha1));
 
-	if (!hashcmp(remote->object.sha1, base_sha1)) {
+	if (!hashcmp(remote->object.oid.hash, base_sha1)) {
 		/* Already merged; result == local commit */
 		if (o->verbosity >= 2)
 			printf("Already up-to-date!\n");
-		hashcpy(result_sha1, local->object.sha1);
+		hashcpy(result_sha1, local->object.oid.hash);
 		goto found_result;
 	}
-	if (!hashcmp(local->object.sha1, base_sha1)) {
+	if (!hashcmp(local->object.oid.hash, base_sha1)) {
 		/* Fast-forward; result == remote commit */
 		if (o->verbosity >= 2)
 			printf("Fast-forward\n");
-		hashcpy(result_sha1, remote->object.sha1);
+		hashcpy(result_sha1, remote->object.oid.hash);
 		goto found_result;
 	}
 
-	result = merge_from_diffs(o, base_tree_sha1, local->tree->object.sha1,
-				  remote->tree->object.sha1, local_tree);
+	result = merge_from_diffs(o, base_tree_sha1, local->tree->object.oid.hash,
+				  remote->tree->object.oid.hash, local_tree);
 
 	if (result != 0) { /* non-trivial merge (with or without conflicts) */
 		/* Commit (partial) result */
 		struct commit_list *parents = NULL;
 		commit_list_insert(remote, &parents); /* LIFO order */
 		commit_list_insert(local, &parents);
-		create_notes_commit(local_tree, parents, &o->commit_msg,
+		create_notes_commit(local_tree, parents,
+				    o->commit_msg.buf, o->commit_msg.len,
 				    result_sha1);
 	}
 
@@ -696,8 +673,8 @@ int notes_merge_commit(struct notes_merge_options *o,
 	DIR *dir;
 	struct dirent *e;
 	struct strbuf path = STRBUF_INIT;
-	char *msg = strstr(partial_commit->buffer, "\n\n");
-	struct strbuf sb_msg = STRBUF_INIT;
+	const char *buffer = get_commit_buffer(partial_commit, NULL);
+	const char *msg = strstr(buffer, "\n\n");
 	int baselen;
 
 	strbuf_addstr(&path, git_path(NOTES_MERGE_WORKTREE));
@@ -744,9 +721,9 @@ int notes_merge_commit(struct notes_merge_options *o,
 		strbuf_setlen(&path, baselen);
 	}
 
-	strbuf_attach(&sb_msg, msg, strlen(msg), strlen(msg) + 1);
-	create_notes_commit(partial_tree, partial_commit->parents, &sb_msg,
-			    result_sha1);
+	create_notes_commit(partial_tree, partial_commit->parents,
+			    msg, strlen(msg), result_sha1);
+	unuse_commit_buffer(partial_commit, buffer);
 	if (o->verbosity >= 4)
 		printf("Finalized notes merge commit: %s\n",
 			sha1_to_hex(result_sha1));

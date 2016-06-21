@@ -12,7 +12,7 @@ SYNOPSIS
 
 DESCRIPTION
 -----------
-'git difftool' is a git command that allows you to compare and edit files
+'git difftool' is a Git command that allows you to compare and edit files
 between revisions using common diff tools.  'git difftool' is a frontend
 to 'git diff' and accepts the same options and arguments. See
 linkgit:git-diff[1].
@@ -69,13 +69,14 @@ with custom merge tool commands and has the same value as `$MERGED`.
 --tool-help::
 	Print a list of diff tools that may be used with `--tool`.
 
---symlinks::
---no-symlinks::
+--[no-]symlinks::
 	'git difftool''s default behavior is create symlinks to the
-	working tree when run in `--dir-diff` mode.
+	working tree when run in `--dir-diff` mode and the right-hand
+	side of the comparison yields the same content as the file in
+	the working tree.
 +
-	Specifying `--no-symlinks` instructs 'git difftool' to create
-	copies instead.  `--no-symlinks` is the default on Windows.
+Specifying `--no-symlinks` instructs 'git difftool' to create copies
+instead.  `--no-symlinks` is the default on Windows.
 
 -x <command>::
 --extcmd=<command>::
@@ -89,6 +90,15 @@ with custom merge tool commands and has the same value as `$MERGED`.
 	When 'git-difftool' is invoked with the `-g` or `--gui` option
 	the default diff tool will be read from the configured
 	`diff.guitool` variable instead of `diff.tool`.
+
+--[no-]trust-exit-code::
+	'git-difftool' invokes a diff tool individually on each file.
+	Errors reported by the diff tool are ignored by default.
+	Use `--trust-exit-code` to make 'git-difftool' exit when an
+	invoked diff tool returns a non-zero exit code.
++
+'git-difftool' will forward the exit code of the invoked tool when
+'--trust-exit-code' is used.
 
 See linkgit:git-diff[1] for the full list of supported options.
 
@@ -114,6 +124,11 @@ See the `--tool=<tool>` option above for more details.
 
 difftool.prompt::
 	Prompt before each invocation of the diff tool.
+
+difftool.trustExitCode::
+	Exit difftool if the invoked diff tool returns a non-zero exit status.
++
+See the `--trust-exit-code` option above for more details.
 
 SEE ALSO
 --------

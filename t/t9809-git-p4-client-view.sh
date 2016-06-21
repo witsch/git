@@ -76,28 +76,28 @@ test_expect_success 'init depot' '
 '
 
 # double % for printf
-test_expect_success 'unsupported view wildcard %%n' '
+test_expect_success 'view wildcard %%n' '
 	client_view "//depot/%%%%1/sub/... //client/sub/%%%%1/..." &&
 	test_when_finished cleanup_git &&
-	test_must_fail git p4 clone --use-client-spec --dest="$git" //depot
+	git p4 clone --use-client-spec --dest="$git" //depot
 '
 
-test_expect_success 'unsupported view wildcard *' '
+test_expect_success 'view wildcard *' '
 	client_view "//depot/*/bar/... //client/*/bar/..." &&
 	test_when_finished cleanup_git &&
-	test_must_fail git p4 clone --use-client-spec --dest="$git" //depot
+	git p4 clone --use-client-spec --dest="$git" //depot
 '
 
-test_expect_success 'wildcard ... only supported at end of spec 1' '
+test_expect_success 'wildcard ... in the middle' '
 	client_view "//depot/.../file11 //client/.../file11" &&
 	test_when_finished cleanup_git &&
-	test_must_fail git p4 clone --use-client-spec --dest="$git" //depot
+	git p4 clone --use-client-spec --dest="$git" //depot
 '
 
-test_expect_success 'wildcard ... only supported at end of spec 2' '
+test_expect_success 'wildcard ... in the middle and at the end' '
 	client_view "//depot/.../a/... //client/.../a/..." &&
 	test_when_finished cleanup_git &&
-	test_must_fail git p4 clone --use-client-spec --dest="$git" //depot
+	git p4 clone --use-client-spec --dest="$git" //depot
 '
 
 test_expect_success 'basic map' '
@@ -196,7 +196,7 @@ test_expect_success 'exclusion single file' '
 
 test_expect_success 'overlay wildcard' '
 	client_view "//depot/dir1/... //client/cli/..." \
-		    "+//depot/dir2/... //client/cli/...\n" &&
+		    "+//depot/dir2/... //client/cli/..." &&
 	files="cli/file11 cli/file12 cli/file21 cli/file22" &&
 	client_verify $files &&
 	test_when_finished cleanup_git &&
@@ -333,7 +333,7 @@ test_expect_success 'subdir clone, submit copy' '
 	(
 		cd "$cli" &&
 		test_path_is_file dir1/file11a &&
-		test ! -w dir1/file11a
+		! is_cli_file_writeable dir1/file11a
 	)
 '
 
@@ -353,7 +353,7 @@ test_expect_success 'subdir clone, submit rename' '
 		cd "$cli" &&
 		test_path_is_missing dir1/file13 &&
 		test_path_is_file dir1/file13a &&
-		test ! -w dir1/file13a
+		! is_cli_file_writeable dir1/file13a
 	)
 '
 
@@ -365,7 +365,10 @@ test_expect_success 'wildcard files submit back to p4, client-spec case' '
 	(
 		cd "$git" &&
 		echo git-wild-hash >dir1/git-wild#hash &&
-		echo git-wild-star >dir1/git-wild\*star &&
+		if test_have_prereq !MINGW,!CYGWIN
+		then
+			echo git-wild-star >dir1/git-wild\*star
+		fi &&
 		echo git-wild-at >dir1/git-wild@at &&
 		echo git-wild-percent >dir1/git-wild%percent &&
 		git add dir1/git-wild* &&
@@ -376,7 +379,10 @@ test_expect_success 'wildcard files submit back to p4, client-spec case' '
 	(
 		cd "$cli" &&
 		test_path_is_file dir1/git-wild#hash &&
-		test_path_is_file dir1/git-wild\*star &&
+		if test_have_prereq !MINGW,!CYGWIN
+		then
+			test_path_is_file dir1/git-wild\*star
+		fi &&
 		test_path_is_file dir1/git-wild@at &&
 		test_path_is_file dir1/git-wild%percent
 	) &&

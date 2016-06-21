@@ -5,15 +5,11 @@ test_description='test cherry-picking many commits'
 . ./test-lib.sh
 
 check_head_differs_from() {
-	head=$(git rev-parse --verify HEAD) &&
-	arg=$(git rev-parse --verify "$1") &&
-	test "$head" != "$arg"
+	! test_cmp_rev HEAD "$1"
 }
 
 check_head_equals() {
-	head=$(git rev-parse --verify HEAD) &&
-	arg=$(git rev-parse --verify "$1") &&
-	test "$head" = "$arg"
+	test_cmp_rev HEAD "$1"
 }
 
 test_expect_success setup '
@@ -59,16 +55,25 @@ one
 two"
 '
 
+test_expect_success 'cherry-pick three one two: fails' '
+	git checkout -f master &&
+	git reset --hard first &&
+	test_must_fail git cherry-pick three one two:
+'
+
 test_expect_success 'output to keep user entertained during multi-pick' '
 	cat <<-\EOF >expected &&
 	[master OBJID] second
 	 Author: A U Thor <author@example.com>
+	 Date: Thu Apr 7 15:14:13 2005 -0700
 	 1 file changed, 1 insertion(+)
 	[master OBJID] third
 	 Author: A U Thor <author@example.com>
+	 Date: Thu Apr 7 15:15:13 2005 -0700
 	 1 file changed, 1 insertion(+)
 	[master OBJID] fourth
 	 Author: A U Thor <author@example.com>
+	 Date: Thu Apr 7 15:16:13 2005 -0700
 	 1 file changed, 1 insertion(+)
 	EOF
 
@@ -96,14 +101,17 @@ test_expect_success 'output during multi-pick indicates merge strategy' '
 	Trying simple merge.
 	[master OBJID] second
 	 Author: A U Thor <author@example.com>
+	 Date: Thu Apr 7 15:14:13 2005 -0700
 	 1 file changed, 1 insertion(+)
 	Trying simple merge.
 	[master OBJID] third
 	 Author: A U Thor <author@example.com>
+	 Date: Thu Apr 7 15:15:13 2005 -0700
 	 1 file changed, 1 insertion(+)
 	Trying simple merge.
 	[master OBJID] fourth
 	 Author: A U Thor <author@example.com>
+	 Date: Thu Apr 7 15:16:13 2005 -0700
 	 1 file changed, 1 insertion(+)
 	EOF
 

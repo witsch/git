@@ -29,7 +29,7 @@ member (you need this if you add things later) and you should set the
   `unsorted_string_list_has_string` and get it from the list using
   `string_list_lookup` for sorted lists.
 
-. Can sort an unsorted list using `sort_string_list`.
+. Can sort an unsorted list using `string_list_sort`.
 
 . Can remove duplicate items from a sorted list using
   `string_list_remove_duplicates`.
@@ -38,7 +38,8 @@ member (you need this if you add things later) and you should set the
   `unsorted_string_list_delete_item`.
 
 . Can remove items not matching a criterion from a sorted or unsorted
-  list using `filter_string_list`.
+  list using `filter_string_list`, or remove empty strings using
+  `string_list_remove_empty_items`.
 
 . Finally it should free the list using `string_list_clear`.
 
@@ -67,6 +68,11 @@ Functions
 
 * General ones (works with sorted and unsorted lists as well)
 
+`string_list_init`::
+
+	Initialize the members of the string_list, set `strdup_strings`
+	member according to the value of the second parameter.
+
 `filter_string_list`::
 
 	Apply a function to each item in a list, retaining only the
@@ -75,13 +81,11 @@ Functions
 	to be deleted.  Preserve the order of the items that are
 	retained.
 
-`string_list_longest_prefix`::
+`string_list_remove_empty_items`::
 
-	Return the longest string within a string_list that is a
-	prefix (in the sense of prefixcmp()) of the specified string,
-	or NULL if no such prefix exists.  This function does not
-	require the string_list to be sorted (it does a linear
-	search).
+	Remove any empty strings from the list.  If free_util is true,
+	call free() on the util members of any items that have to be
+	deleted.  Preserve the order of the items that are retained.
 
 `print_string_list`::
 
@@ -142,7 +146,7 @@ write `string_list_insert(...)->util = ...;`.
 	ownership of a malloc()ed string to a `string_list` that has
 	`strdup_string` set.
 
-`sort_string_list`::
+`string_list_sort`::
 
 	Sort the list's entries by string value in `strcmp()` order.
 
@@ -201,3 +205,5 @@ Represents the list itself.
   You should not tamper with it.
 . Setting the `strdup_strings` member to 1 will strdup() the strings
   before adding them, see above.
+. The `compare_strings_fn` member is used to specify a custom compare
+  function, otherwise `strcmp()` is used as the default function.

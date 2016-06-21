@@ -14,7 +14,10 @@ test_expect_success 'add p4 files with wildcards in the names' '
 		printf "file2\nhas\nsome\nrandom\ntext\n" >file2 &&
 		p4 add file2 &&
 		echo file-wild-hash >file-wild#hash &&
-		echo file-wild-star >file-wild\*star &&
+		if test_have_prereq !MINGW,!CYGWIN
+		then
+			echo file-wild-star >file-wild\*star
+		fi &&
 		echo file-wild-at >file-wild@at &&
 		echo file-wild-percent >file-wild%percent &&
 		p4 add -f file-wild* &&
@@ -28,7 +31,10 @@ test_expect_success 'wildcard files git p4 clone' '
 	(
 		cd "$git" &&
 		test -f file-wild#hash &&
-		test -f file-wild\*star &&
+		if test_have_prereq !MINGW,!CYGWIN
+		then
+			test -f file-wild\*star
+		fi &&
 		test -f file-wild@at &&
 		test -f file-wild%percent
 	)
@@ -40,7 +46,10 @@ test_expect_success 'wildcard files submit back to p4, add' '
 	(
 		cd "$git" &&
 		echo git-wild-hash >git-wild#hash &&
-		echo git-wild-star >git-wild\*star &&
+		if test_have_prereq !MINGW,!CYGWIN
+		then
+			echo git-wild-star >git-wild\*star
+		fi &&
 		echo git-wild-at >git-wild@at &&
 		echo git-wild-percent >git-wild%percent &&
 		git add git-wild* &&
@@ -51,7 +60,10 @@ test_expect_success 'wildcard files submit back to p4, add' '
 	(
 		cd "$cli" &&
 		test_path_is_file git-wild#hash &&
-		test_path_is_file git-wild\*star &&
+		if test_have_prereq !MINGW,!CYGWIN
+		then
+			test_path_is_file git-wild\*star
+		fi &&
 		test_path_is_file git-wild@at &&
 		test_path_is_file git-wild%percent
 	)
@@ -63,7 +75,10 @@ test_expect_success 'wildcard files submit back to p4, modify' '
 	(
 		cd "$git" &&
 		echo new-line >>git-wild#hash &&
-		echo new-line >>git-wild\*star &&
+		if test_have_prereq !MINGW,!CYGWIN
+		then
+			echo new-line >>git-wild\*star
+		fi &&
 		echo new-line >>git-wild@at &&
 		echo new-line >>git-wild%percent &&
 		git add git-wild* &&
@@ -74,7 +89,10 @@ test_expect_success 'wildcard files submit back to p4, modify' '
 	(
 		cd "$cli" &&
 		test_line_count = 2 git-wild#hash &&
-		test_line_count = 2 git-wild\*star &&
+		if test_have_prereq !MINGW,!CYGWIN
+		then
+			test_line_count = 2 git-wild\*star
+		fi &&
 		test_line_count = 2 git-wild@at &&
 		test_line_count = 2 git-wild%percent
 	)
@@ -87,7 +105,7 @@ test_expect_success 'wildcard files submit back to p4, copy' '
 		cd "$git" &&
 		cp file2 git-wild-cp#hash &&
 		git add git-wild-cp#hash &&
-		cp git-wild\*star file-wild-3 &&
+		cp git-wild#hash file-wild-3 &&
 		git add file-wild-3 &&
 		git commit -m "wildcard copies" &&
 		git config git-p4.detectCopies true &&
@@ -134,9 +152,62 @@ test_expect_success 'wildcard files submit back to p4, delete' '
 	(
 		cd "$cli" &&
 		test_path_is_missing git-wild#hash &&
-		test_path_is_missing git-wild\*star &&
+		if test_have_prereq !MINGW,!CYGWIN
+		then
+			test_path_is_missing git-wild\*star
+		fi &&
 		test_path_is_missing git-wild@at &&
 		test_path_is_missing git-wild%percent
+	)
+'
+
+test_expect_success 'p4 deleted a wildcard file' '
+	(
+		cd "$cli" &&
+		echo "wild delete test" >wild@delete &&
+		p4 add -f wild@delete &&
+		p4 submit -d "add wild@delete"
+	) &&
+	test_when_finished cleanup_git &&
+	git p4 clone --dest="$git" //depot &&
+	(
+		cd "$git" &&
+		test_path_is_file wild@delete
+	) &&
+	(
+		cd "$cli" &&
+		# must use its encoded name
+		p4 delete wild%40delete &&
+		p4 submit -d "delete wild@delete"
+	) &&
+	(
+		cd "$git" &&
+		git p4 sync &&
+		git merge --ff-only p4/master &&
+		test_path_is_missing wild@delete
+	)
+'
+
+test_expect_success 'wildcard files requiring keyword scrub' '
+	(
+		cd "$cli" &&
+		cat <<-\EOF >scrub@wild &&
+		$Id$
+		line2
+		EOF
+		p4 add -t text+k -f scrub@wild &&
+		p4 submit -d "scrub at wild"
+	) &&
+	test_when_finished cleanup_git &&
+	git p4 clone --dest="$git" //depot &&
+	(
+		cd "$git" &&
+		git config git-p4.skipSubmitEdit true &&
+		git config git-p4.attemptRCSCleanup true &&
+		sed "s/^line2/line2 edit/" <scrub@wild >scrub@wild.tmp &&
+		mv -f scrub@wild.tmp scrub@wild &&
+		git commit -m "scrub at wild line2 edit" scrub@wild &&
+		git p4 submit
 	)
 '
 

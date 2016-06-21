@@ -153,6 +153,8 @@ static unsigned int ustar_header_chksum(const struct ustar_header *header)
 static size_t get_path_prefix(const char *path, size_t pathlen, size_t maxlen)
 {
 	size_t i = pathlen;
+	if (i > 1 && path[i - 1] == '/')
+		i--;
 	if (i > maxlen)
 		i = maxlen;
 	do {
@@ -165,21 +167,21 @@ static void prepare_header(struct archiver_args *args,
 			   struct ustar_header *header,
 			   unsigned int mode, unsigned long size)
 {
-	sprintf(header->mode, "%07o", mode & 07777);
-	sprintf(header->size, "%011lo", S_ISREG(mode) ? size : 0);
-	sprintf(header->mtime, "%011lo", (unsigned long) args->time);
+	xsnprintf(header->mode, sizeof(header->mode), "%07o", mode & 07777);
+	xsnprintf(header->size, sizeof(header->size), "%011lo", S_ISREG(mode) ? size : 0);
+	xsnprintf(header->mtime, sizeof(header->mtime), "%011lo", (unsigned long) args->time);
 
-	sprintf(header->uid, "%07o", 0);
-	sprintf(header->gid, "%07o", 0);
+	xsnprintf(header->uid, sizeof(header->uid), "%07o", 0);
+	xsnprintf(header->gid, sizeof(header->gid), "%07o", 0);
 	strlcpy(header->uname, "root", sizeof(header->uname));
 	strlcpy(header->gname, "root", sizeof(header->gname));
-	sprintf(header->devmajor, "%07o", 0);
-	sprintf(header->devminor, "%07o", 0);
+	xsnprintf(header->devmajor, sizeof(header->devmajor), "%07o", 0);
+	xsnprintf(header->devminor, sizeof(header->devminor), "%07o", 0);
 
 	memcpy(header->magic, "ustar", 6);
 	memcpy(header->version, "00", 2);
 
-	sprintf(header->chksum, "%07o", ustar_header_chksum(header));
+	snprintf(header->chksum, sizeof(header->chksum), "%07o", ustar_header_chksum(header));
 }
 
 static int write_extended_header(struct archiver_args *args,
@@ -191,7 +193,7 @@ static int write_extended_header(struct archiver_args *args,
 	memset(&header, 0, sizeof(header));
 	*header.typeflag = TYPEFLAG_EXT_HEADER;
 	mode = 0100666;
-	sprintf(header.name, "%s.paxheader", sha1_to_hex(sha1));
+	xsnprintf(header.name, sizeof(header.name), "%s.paxheader", sha1_to_hex(sha1));
 	prepare_header(args, &header, mode, size);
 	write_blocked(&header, sizeof(header));
 	write_blocked(buffer, size);
@@ -231,10 +233,10 @@ static int write_tar_entry(struct archiver_args *args,
 		size_t rest = pathlen - plen - 1;
 		if (plen > 0 && rest <= sizeof(header.name)) {
 			memcpy(header.prefix, path, plen);
-				memcpy(header.name, path + plen + 1, rest);
+			memcpy(header.name, path + plen + 1, rest);
 		} else {
-			sprintf(header.name, "%s.data",
-				sha1_to_hex(sha1));
+			xsnprintf(header.name, sizeof(header.name), "%s.data",
+				  sha1_to_hex(sha1));
 			strbuf_append_ext_header(&ext_header, "path",
 						 path, pathlen);
 		}
@@ -257,8 +259,8 @@ static int write_tar_entry(struct archiver_args *args,
 
 	if (S_ISLNK(mode)) {
 		if (size > sizeof(header.linkname)) {
-			sprintf(header.linkname, "see %s.paxheader",
-			        sha1_to_hex(sha1));
+			xsnprintf(header.linkname, sizeof(header.linkname),
+				  "see %s.paxheader", sha1_to_hex(sha1));
 			strbuf_append_ext_header(&ext_header, "linkpath",
 			                         buffer, size);
 		} else
@@ -299,7 +301,7 @@ static int write_global_extended_header(struct archiver_args *args)
 	memset(&header, 0, sizeof(header));
 	*header.typeflag = TYPEFLAG_GLOBAL_HEADER;
 	mode = 0100666;
-	strcpy(header.name, "pax_global_header");
+	xsnprintf(header.name, sizeof(header.name), "pax_global_header");
 	prepare_header(args, &header, mode, ext_header.len);
 	write_blocked(&header, sizeof(header));
 	write_blocked(ext_header.buf, ext_header.len);
@@ -325,20 +327,12 @@ static struct archiver *find_tar_filter(const char *name, int len)
 static int tar_filter_config(const char *var, const char *value, void *data)
 {
 	struct archiver *ar;
-	const char *dot;
 	const char *name;
 	const char *type;
 	int namelen;
 
-	if (prefixcmp(var, "tar."))
+	if (parse_config_key(var, "tar", &name, &namelen, &type) < 0 || !name)
 		return 0;
-	dot = strrchr(var, '.');
-	if (dot == var + 9)
-		return 0;
-
-	name = var + 4;
-	namelen = dot - name;
-	type = dot + 1;
 
 	ar = find_tar_filter(name, namelen);
 	if (!ar) {
@@ -401,7 +395,7 @@ static int write_tar_filter_archive(const struct archiver *ar,
 				    struct archiver_args *args)
 {
 	struct strbuf cmd = STRBUF_INIT;
-	struct child_process filter;
+	struct child_process filter = CHILD_PROCESS_INIT;
 	const char *argv[2];
 	int r;
 
@@ -412,7 +406,6 @@ static int write_tar_filter_archive(const struct archiver *ar,
 	if (args->compression_level >= 0)
 		strbuf_addf(&cmd, " -%d", args->compression_level);
 
-	memset(&filter, 0, sizeof(filter));
 	argv[0] = cmd.buf;
 	argv[1] = NULL;
 	filter.argv = argv;
